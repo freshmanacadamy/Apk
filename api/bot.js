@@ -2,23 +2,34 @@ const { Telegraf } = require('telegraf');
 const axios = require('axios');
 const cheerio = require('cheerio');
 
-const bot = new Telegraf(process.env.BOT_TOKEN);
+// Check if BOT_TOKEN is available
+const BOT_TOKEN = process.env.BOT_TOKEN;
+if (!BOT_TOKEN) {
+  console.error('❌ BOT_TOKEN environment variable is required');
+  process.exit(1);
+}
 
-// APKPure scraper with file download capability
-class APKPureScraper {
+const bot = new Telegraf(BOT_TOKEN);
+
+console.log('🤖 APK Search Bot starting...');
+
+class APKSearch {
   constructor() {
     this.baseURL = 'https://apkpure.com';
-    this.searchURL = 'https://apkpure.com/search';
   }
 
   async searchAPK(query) {
     try {
       console.log(`🔍 Searching for: ${query}`);
       
-      const response = await axios.get(this.searchURL, {
-        params: { page: 1, q: query },
+      const response = await axios.get(`${this.baseURL}/search`, {
+        params: { 
+          page: 1, 
+          q: query 
+        },
         headers: {
-          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+          'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8'
         },
         timeout: 10000
       });
@@ -26,38 +37,41 @@ class APKPureScraper {
       const $ = cheerio.load(response.data);
       const results = [];
 
-      $('.search-list .search-item').each((index, element) => {
-        if (index >= 8) return false; // Limit to 8 results
+      // Multiple selector strategies
+      $('.search-item, .gd').each((index, element) => {
+        if (index >= 5) return false;
         
         const $item = $(element);
-        const title = $item.find('.p1').text().trim();
-        const link = $item.find('a').attr('href');
-        const icon = $item.find('.lazy').data('src') || $item.find('img').attr('src');
+        const title = $item.find('.p1, .title').first().text().trim();
+        const link = $item.find('a').first().attr('href');
         
         if (title && link) {
+          const fullLink = link.startsWith('http') ? link : this.baseURL + link;
+          const packageName = fullLink.split('/').pop();
+          
           results.push({
-            title,
-            link: link.startsWith('http') ? link : this.baseURL + link,
-            icon: icon ? (icon.startsWith('http') ? icon : this.baseURL + icon) : null,
-            package: link.split('/').pop()
+            title: title,
+            package: packageName,
+            link: fullLink
           });
         }
       });
 
-      console.log(`✅ Found ${results.length} results for: ${query}`);
+      console.log(`✅ Found ${results.length} results`);
       return results;
 
     } catch (error) {
       console.error('❌ Search error:', error.message);
-      throw new Error('Failed to search APK. Please try again later.');
+      throw new Error('Search failed. Please try again.');
     }
   }
 
-  async getAPKDetails(apkURL) {
+  async getDownloadLink(packageName) {
     try {
-      console.log(`📦 Getting details for: ${apkURL}`);
+      const url = `${this.baseURL}/${packageName}`;
+      console.log(`📦 Getting download link for: ${packageName}`);
       
-      const response = await axios.get(apkURL, {
+      const response = await axios.get(url, {
         headers: {
           'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
         },
@@ -66,145 +80,80 @@ class APKPureScraper {
 
       const $ = cheerio.load(response.data);
       
-      // Extract APK details
-      const title = $('.title-like h1').text().trim();
-      const version = $('.details-sdk .active').first().text().trim();
-      const size = $('.details-sdk .size').text().trim();
-      const updateDate = $('.details-sdk .update').text().trim();
-      const downloads = $('.details-sdk .download').text().trim();
+      // Get app title
+      const title = $('title').text().replace(' - APKPure.com', '') || packageName;
       
       // Find download link
       let downloadLink = '';
-      $('.download-btn').each((index, element) => {
-        const href = $(element).attr('href');
+      $('a[href*="/APK/"], a.download-btn').each((i, el) => {
+        const href = $(el).attr('href');
         if (href && href.includes('/APK/')) {
           downloadLink = href;
           return false;
         }
       });
 
-      if (!downloadLink) {
-        // Alternative method to find download link
-        const downloadBtn = $('a[href*="/APK/"]').first();
-        downloadLink = downloadBtn.attr('href') || '';
+      if (downloadLink && !downloadLink.startsWith('http')) {
+        downloadLink = this.baseURL + downloadLink;
       }
 
       return {
-        title: title || 'Unknown',
-        version: version || 'Unknown',
-        size: size || 'Unknown',
-        updateDate: updateDate || 'Unknown',
-        downloads: downloads || 'Unknown',
-        downloadLink: downloadLink ? (downloadLink.startsWith('http') ? downloadLink : this.baseURL + downloadLink) : null,
-        success: !!downloadLink
+        success: !!downloadLink,
+        title: title,
+        package: packageName,
+        downloadLink: downloadLink || `https://apkpure.com/${packageName}`
       };
 
     } catch (error) {
-      console.error('❌ APK details error:', error.message);
-      throw new Error('Failed to get APK details. Please try again.');
-    }
-  }
-
-  async downloadAPKFile(downloadPageURL) {
-    try {
-      console.log(`⬇️ Getting direct download from: ${downloadPageURL}`);
-      
-      const response = await axios.get(downloadPageURL, {
-        headers: {
-          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-        },
-        timeout: 15000
-      });
-
-      const $ = cheerio.load(response.data);
-      
-      // Find the direct download link
-      let directLink = '';
-      $('a[href*=".apk?f="]').each((index, element) => {
-        const href = $(element).attr('href');
-        if (href && href.includes('.apk?')) {
-          directLink = href;
-          return false;
-        }
-      });
-
-      if (!directLink) {
-        // Alternative selector
-        directLink = $('a[data-download-file]').attr('href') || '';
-      }
-
-      if (directLink && !directLink.startsWith('http')) {
-        directLink = this.baseURL + directLink;
-      }
-
-      if (!directLink) {
-        throw new Error('No download link found');
-      }
-
-      console.log(`✅ Direct link found: ${directLink}`);
-
-      // Download the APK file
-      const fileResponse = await axios({
-        method: 'GET',
-        url: directLink,
-        responseType: 'stream',
-        timeout: 30000, // 30 seconds timeout
-        headers: {
-          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-          'Accept': '*/*'
-        }
-      });
-
+      console.error('❌ Download link error:', error);
       return {
-        stream: fileResponse.data,
-        contentLength: fileResponse.headers['content-length'],
-        contentType: fileResponse.headers['content-type']
+        success: false,
+        title: packageName,
+        package: packageName,
+        error: error.message
       };
-
-    } catch (error) {
-      console.error('❌ Download error:', error.message);
-      throw new Error('Failed to download APK file. File might be too large or unavailable.');
     }
   }
 }
 
-const scraper = new APKPureScraper();
+const apkSearch = new APKSearch();
 
-// Bot commands and handlers
+// Bot commands
 bot.start((ctx) => {
-  ctx.reply(`🤖 Welcome to APK Search Bot!
+  ctx.reply(`🤖 APK Search Bot
 
-🔍 <b>How to use:</b>
-/search [app name] - Search for APK files
-/download [package] - Download APK file directly
+🔍 Search APK files from APKPure
+📱 Get download links instantly
 
-📱 <b>Example:</b>
-<code>/search whatsapp</code>
-<code>/download com.whatsapp</code>
+**Commands:**
+/search <app name> - Search for apps
+/dl <package> - Get download link
+/help - Show help
 
-⚠️ <b>Note:</b> 
-- Files are sent directly as Telegram documents
-- Max file size: 50MB (Telegram limit)
-- Download at your own risk`, {
-    parse_mode: 'HTML'
+**Example:**
+/search whatsapp
+/dl com.whatsapp
+
+Bot is working! 🎉`, {
+    parse_mode: 'Markdown'
   });
 });
 
 bot.help((ctx) => {
-  ctx.reply(`📖 <b>APK Bot Help</b>
+  ctx.reply(`Help Guide:
 
-🔍 <b>Search:</b>
-<code>/search telegram</code>
-<code>/search minecraft</code>
+1. Search for apps:
+   \`/search whatsapp\`
+   \`/search minecraft\`
 
-⬇️ <b>Download:</b>
-<code>/download com.telegram</code>
+2. Get download link:
+   \`/dl com.whatsapp\`
+   \`/dl com.telegram\`
 
-💡 <b>Tips:</b>
-- Bot sends APK files directly
-- Files up to 50MB supported
-- Use specific app names for better results`, {
-    parse_mode: 'HTML'
+3. Download from the provided link
+
+Note: Always verify APK files before installing.`, {
+    parse_mode: 'Markdown'
   });
 });
 
@@ -213,187 +162,150 @@ bot.command('search', async (ctx) => {
   const query = ctx.message.text.split(' ').slice(1).join(' ').trim();
   
   if (!query) {
-    return ctx.reply('❌ Please provide a search query.\nExample: <code>/search whatsapp</code>', {
-      parse_mode: 'HTML'
+    return ctx.reply('Please provide a search query.\nExample: `/search whatsapp`', {
+      parse_mode: 'Markdown',
+      reply_to_message_id: ctx.message.message_id
     });
-  }
-
-  if (query.length < 2) {
-    return ctx.reply('❌ Search query too short. Use at least 2 characters.');
   }
 
   try {
-    const searchMsg = await ctx.reply(`🔍 Searching for "<b>${query}</b>"...`, {
-      parse_mode: 'HTML'
-    });
+    const searchMsg = await ctx.reply(`🔍 Searching for "${query}"...`);
 
-    const results = await scraper.searchAPK(query);
+    const results = await apkSearch.searchAPK(query);
     
     if (!results || results.length === 0) {
       await ctx.telegram.editMessageText(
         ctx.chat.id,
         searchMsg.message_id,
         null,
-        `❌ No APK files found for "<b>${query}</b>"\n\nTry a different search term.`,
-        { parse_mode: 'HTML' }
+        `❌ No results found for "${query}"\n\nTry a different search term.`
       );
       return;
     }
 
-    let message = `📱 <b>Search Results for "${query}"</b>\n\n`;
+    let message = `📱 Results for "${query}":\n\n`;
     
     results.forEach((result, index) => {
-      message += `${index + 1}. <b>${result.title}</b>\n`;
-      message += `   📦 <code>${result.package}</code>\n`;
-      message += `   ⬇️ <code>/download ${result.package}</code>\n\n`;
+      message += `${index + 1}. **${result.title}**\n`;
+      message += `   📦 \`${result.package}\`\n`;
+      message += `   ⬇️ \`/dl ${result.package}\`\n\n`;
     });
 
-    message += `💡 <i>Use /download [package] to get the APK file</i>`;
+    message += `Use \`/dl <package>\` to get download links.`;
 
     await ctx.telegram.editMessageText(
       ctx.chat.id,
       searchMsg.message_id,
       null,
       message,
-      { parse_mode: 'HTML' }
+      { parse_mode: 'Markdown' }
     );
 
   } catch (error) {
     console.error('Search command error:', error);
-    ctx.reply('❌ Failed to search APK files. Please try again later.');
+    await ctx.reply('❌ Search failed. Please try again later.');
   }
 });
 
-// Download command - Sends file directly
-bot.command('download', async (ctx) => {
+// Download command
+bot.command('dl', async (ctx) => {
   const packageName = ctx.message.text.split(' ')[1];
   
   if (!packageName) {
-    return ctx.reply('❌ Please provide a package name.\nExample: <code>/download com.whatsapp</code>', {
-      parse_mode: 'HTML'
+    return ctx.reply('Please provide a package name.\nExample: `/dl com.whatsapp`', {
+      parse_mode: 'Markdown',
+      reply_to_message_id: ctx.message.message_id
     });
   }
 
   try {
-    const apkURL = `https://apkpure.com/${packageName}`;
-    
-    // Show loading message
-    const loadingMsg = await ctx.reply(`📦 Getting APK details for <code>${packageName}</code>...`, {
-      parse_mode: 'HTML'
+    const loadingMsg = await ctx.reply(`📦 Getting download link for \`${packageName}\`...`, {
+      parse_mode: 'Markdown'
     });
 
-    const details = await scraper.getAPKDetails(apkURL);
+    const result = await apkSearch.getDownloadLink(packageName);
     
-    if (!details.success || !details.downloadLink) {
+    if (result.success) {
       await ctx.telegram.editMessageText(
         ctx.chat.id,
         loadingMsg.message_id,
         null,
-        `❌ APK not found for package: <code>${packageName}</code>\n\nTry searching first with /search command.`,
-        { parse_mode: 'HTML' }
+        `📱 **${result.title}**\n\n📦 Package: \`${result.package}\`\n\n⬇️ Download Link:\n${result.downloadLink}\n\n⚠️ Always scan APK files before installing.`,
+        { parse_mode: 'Markdown' }
       );
-      return;
-    }
-
-    // Update message to show downloading
-    await ctx.telegram.editMessageText(
-      ctx.chat.id,
-      loadingMsg.message_id,
-      null,
-      `📱 <b>${details.title}</b>\n\n📦 Package: <code>${packageName}</code>\n🔄 Version: ${details.version}\n💾 Size: ${details.size}\n\n⏳ Downloading APK file...`,
-      { parse_mode: 'HTML' }
-    );
-
-    // Download and send the APK file
-    const fileData = await scraper.downloadAPKFile(details.downloadLink);
-    
-    // Check file size (Telegram limit: 50MB for bots)
-    const fileSize = parseInt(fileData.contentLength || '0');
-    if (fileSize > 50 * 1024 * 1024) {
+    } else {
       await ctx.telegram.editMessageText(
         ctx.chat.id,
         loadingMsg.message_id,
         null,
-        `❌ File too large: ${(fileSize / (1024 * 1024)).toFixed(1)}MB\n\nTelegram limit is 50MB for bots.`,
-        { parse_mode: 'HTML' }
+        `❌ Could not get download link for \`${packageName}\`\n\nTry visiting: https://apkpure.com/${packageName}`,
+        { parse_mode: 'Markdown' }
       );
-      return;
     }
-
-    // Generate filename
-    const fileName = `${details.title.replace(/[^a-zA-Z0-9]/g, '_')}_v${details.version}.apk`;
-    
-    // Update message to show sending file
-    await ctx.telegram.editMessageText(
-      ctx.chat.id,
-      loadingMsg.message_id,
-      null,
-      `📱 <b>${details.title}</b>\n\n📦 Package: <code>${packageName}</code>\n🔄 Version: ${details.version}\n💾 Size: ${details.size}\n\n📤 Sending APK file...`,
-      { parse_mode: 'HTML' }
-    );
-
-    // Send the file as document
-    await ctx.replyWithDocument({
-      source: fileData.stream,
-      filename: fileName
-    }, {
-      caption: `📱 <b>${details.title}</b>\n\n📦 Package: <code>${packageName}</code>\n🔄 Version: ${details.version}\n💾 Size: ${details.size}\n\n⚠️ <i>Scan for viruses before installing</i>`,
-      parse_mode: 'HTML'
-    });
-
-    // Delete the loading message
-    await ctx.telegram.deleteMessage(ctx.chat.id, loadingMsg.message_id);
-
   } catch (error) {
     console.error('Download command error:', error);
-    
-    try {
-      await ctx.reply(`❌ Failed to download APK: ${error.message}\n\nPossible reasons:\n• File too large (>50MB)\n• Network error\n• APK not available\n\nPlease try again later.`);
-    } catch (replyError) {
-      console.error('Failed to send error message:', replyError);
-    }
+    await ctx.reply(`❌ Error: ${error.message}`);
   }
 });
 
-// Handle text messages that might be package names
+// Handle text that looks like package names
 bot.on('text', async (ctx) => {
   const text = ctx.message.text.trim();
   
-  // If it looks like a package name (contains dots)
-  if (text.includes('.') && !text.startsWith('/')) {
-    try {
-      const loadingMsg = await ctx.reply(`🔍 Checking if <code>${text}</code> is a valid package...`, {
-        parse_mode: 'HTML'
-      });
-
-      const apkURL = `https://apkpure.com/${text}`;
-      const details = await scraper.getAPKDetails(apkURL);
-      
-      if (details.success) {
-        await ctx.telegram.editMessageText(
-          ctx.chat.id,
-          loadingMsg.message_id,
-          null,
-          `📱 <b>${details.title}</b>\n\n📦 Package: <code>${text}</code>\n🔄 Version: ${details.version}\n💾 Size: ${details.size}\n\n⬇️ Use <code>/download ${text}</code> to get the APK file`,
-          { parse_mode: 'HTML' }
-        );
-      } else {
-        await ctx.telegram.editMessageText(
-          ctx.chat.id,
-          loadingMsg.message_id,
-          null,
-          `❌ Package not found: <code>${text}</code>\n\nTry searching with /search command first.`,
-          { parse_mode: 'HTML' }
-        );
-      }
-    } catch (error) {
-      await ctx.reply('❌ Invalid package name or network error.');
-    }
+  // Ignore commands
+  if (text.startsWith('/')) return;
+  
+  // If text looks like a package name (contains dots)
+  if (text.includes('.') && text.length > 3) {
+    ctx.reply(`Use \`/dl ${text}\` to get download link for this package.`, {
+      parse_mode: 'Markdown',
+      reply_to_message_id: ctx.message.message_id
+    });
   }
 });
 
-// Webhook handler for Vercel
+// Error handling
+bot.catch((err, ctx) => {
+  console.error(`Error for ${ctx.updateType}:`, err);
+  ctx.reply('❌ An error occurred. Please try again.');
+});
+
+// Webhook setup for production
+if (process.env.VERCEL_URL) {
+  const webhookUrl = `https://${process.env.VERCEL_URL}/api/bot`;
+  bot.telegram.setWebhook(webhookUrl).then(() => {
+    console.log(`✅ Webhook set to: ${webhookUrl}`);
+  }).catch(console.error);
+} else {
+  // Development mode
+  bot.launch().then(() => {
+    console.log('🚀 Bot running in development mode');
+  }).catch(console.error);
+}
+
+// Vercel serverless function handler
 module.exports = async (req, res) => {
+  // CORS headers
+  res.setHeader('Access-Control-Allow-Credentials', true);
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET,OPTIONS,PATCH,DELETE,POST,PUT');
+  res.setHeader('Access-Control-Allow-Headers', 'X-CSRF-Token, X-Requested-With, Accept, Accept-Version, Content-Length, Content-MD5, Content-Type, Date, X-Api-Version');
+
+  if (req.method === 'OPTIONS') {
+    res.status(200).end();
+    return;
+  }
+
+  if (req.method === 'GET') {
+    res.status(200).json({
+      status: 'Bot is running!',
+      service: 'APK Search Bot',
+      timestamp: new Date().toISOString(),
+      environment: process.env.NODE_ENV || 'production'
+    });
+    return;
+  }
+
   if (req.method === 'POST') {
     try {
       await bot.handleUpdate(req.body, res);
@@ -402,11 +314,10 @@ module.exports = async (req, res) => {
       res.status(200).send('OK');
     }
   } else {
-    res.status(200).json({ 
-      status: 'APK Search Bot is running!',
-      description: 'Sends APK files directly as Telegram documents',
-      max_file_size: '50MB',
-      commands: ['/search', '/download']
-    });
+    res.status(404).json({ error: 'Not found' });
   }
 };
+
+// Graceful shutdown
+process.once('SIGINT', () => bot.stop('SIGINT'));
+process.once('SIGTERM', () => bot.stop('SIGTERM'));
