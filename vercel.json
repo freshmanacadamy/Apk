@@ -2,14 +2,27 @@
   "version": 2,
   "builds": [
     {
+      "src": "package.json",
+      "use": "@vercel/static-build",
+      "config": {
+        "distDir": "."
+      }
+    },
+    {
       "src": "api/bot.js",
       "use": "@vercel/node"
     }
   ],
   "routes": [
     {
+      "src": "/api/(.*)",
+      "dest": "/api/bot.js"
+    },
+    {
       "src": "/(.*)",
-      "dest": "/api/bot"
+      "dest": "/api/bot.js"
     }
-  ]
+  ],
+  "buildCommand": "npm run build",
+  "outputDirectory": "."
 }
